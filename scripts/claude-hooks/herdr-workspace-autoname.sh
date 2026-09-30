@@ -21,7 +21,7 @@ set -eu
 [ "${HERDR_AUTONAME_DISABLE:-}" = "1" ] && exit 0
 [ "${HERDR_ENV:-}" = "1" ] || exit 0
 [ -n "${HERDR_WORKSPACE_ID:-}" ] || exit 0
-command -v herdr >/dev/null 2>&1 || exit 0
+command -v herdr >/dev/null 2>&1 || [ -n "${HERDR_BIN_PATH:-}" ] || [ -n "${HERDR_AUTONAME_BIN:-}" ] || exit 0
 command -v claude >/dev/null 2>&1 || exit 0
 [ -x /usr/bin/python3 ] || exit 0
 
@@ -127,13 +127,45 @@ def run(args, stdin_text=None, timeout=60):
     )
 
 
+def herdr_candidates():
+    """Binaries to try, in order. A freshly installed CLI can be newer than the
+    running server, so older sibling builds such as herdr-0.7.4 are fallbacks."""
+    import glob, shutil
+    seen, out = set(), []
+    for candidate in (os.environ.get("HERDR_AUTONAME_BIN"), os.environ.get("HERDR_BIN_PATH"), shutil.which("herdr")):
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            out.append(candidate)
+    for base in list(out):
+        for sibling in sorted(glob.glob(os.path.join(os.path.dirname(base), "herdr-*")), reverse=True):
+            if os.access(sibling, os.X_OK) and sibling not in seen:
+                seen.add(sibling)
+                out.append(sibling)
+    return out
+
+
+def resolve_herdr():
+    """Returns the first binary whose protocol the running server accepts."""
+    for candidate in herdr_candidates():
+        try:
+            result = run([candidate, "workspace", "get", workspace_id], timeout=10)
+            payload = json.loads(result.stdout)
+            if "result" in payload:
+                return candidate, str(payload["result"]["workspace"]["label"])
+            log(f"turn {turn}: {candidate} rejected: {payload.get('error', {}).get('code')}")
+        except Exception as error:
+            log(f"turn {turn}: {candidate} failed: {error}")
+    return None, ""
+
+
+HERDR, label_now = resolve_herdr()
+if HERDR is None:
+    log(f"turn {turn}: no herdr binary can talk to the server")
+    sys.exit(0)
+
+
 def current_label():
-    try:
-        result = run(["herdr", "workspace", "get", workspace_id], timeout=10)
-        payload = json.loads(result.stdout)
-        return str(payload["result"]["workspace"]["label"])
-    except Exception:
-        return ""
+    return label_now
 
 
 RULES = (
@@ -174,8 +206,8 @@ if label_before is not None and label == label_before:
     log(f"turn {turn}: kept {label!r}")
     sys.exit(0)
 try:
-    result = run(["herdr", "workspace", "rename", workspace_id, label], timeout=10)
-    log(f"turn {turn}: renamed {workspace_id} {label_before!r} -> {label!r}: {result.stdout.strip()[:200]}")
+    result = run([HERDR, "workspace", "rename", workspace_id, label], timeout=10)
+    log(f"turn {turn}: renamed {workspace_id} {label_before!r} -> {label!r} via {HERDR}: {(result.stdout or result.stderr).strip()[:200]}")
 except Exception as error:
     log(f"turn {turn}: rename failed: {error}")
 PY
