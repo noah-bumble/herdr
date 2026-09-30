@@ -2477,6 +2477,72 @@ mod tests {
     }
 
     #[test]
+    fn pane_set_seen_request_toggles_done_status() {
+        // Bumble Confidential. For Internal Use Only.
+        let mut app = test_app();
+        let workspace = Workspace::test_new("api-pane-set-seen");
+        let pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let pane_id = app.pane_info(0, pane).unwrap().pane_id;
+        assert_eq!(
+            app.pane_info(0, pane).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Idle
+        );
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_unseen".into(),
+            method: crate::api::schema::Method::PaneSetSeen(
+                crate::api::schema::PaneSetSeenParams {
+                    pane_id: pane_id.clone(),
+                    seen: false,
+                },
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "pane_info");
+        assert_eq!(response["result"]["pane"]["agent_status"], "done");
+        assert!(!app.state.workspaces[0].pane_state(pane).unwrap().seen);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_seen".into(),
+            method: crate::api::schema::Method::PaneSetSeen(
+                crate::api::schema::PaneSetSeenParams {
+                    pane_id,
+                    seen: true,
+                },
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["pane"]["agent_status"], "idle");
+        assert!(app.state.workspaces[0].pane_state(pane).unwrap().seen);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_missing".into(),
+            method: crate::api::schema::Method::PaneSetSeen(
+                crate::api::schema::PaneSetSeenParams {
+                    pane_id: "w999:p1".into(),
+                    seen: false,
+                },
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "pane_not_found");
+    }
+
+    #[test]
     fn terminal_and_agent_targets_treat_terminal_ids_differently() {
         let mut app = test_app();
         let workspace = Workspace::test_new("terminal-target-id");

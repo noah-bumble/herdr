@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+- Right-click an agent row in the Agents panel to mark it unread or read. Mark unread shows the pane as done until you focus it again. The new `pane.set_seen` socket method backs this. (fork)
+- `scripts/claude-hooks/herdr-workspace-autoname.sh`: a Claude Code `UserPromptSubmit` hook that names the current workspace from the first prompt of a conversation, using a small Claude model. (fork)
+
 ## [0.9.3] - 2026-09-29
 
 This is a hotfix release for v0.9.2. See the v0.9.2 notes for the full feature release: https://github.com/herdrdev/herdr/releases/tag/v0.9.2

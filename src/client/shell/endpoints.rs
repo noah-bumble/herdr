@@ -653,6 +653,42 @@ impl ClientShellState {
         }
     }
 
+    /// Applies a manual read or unread mark to an agent on the active endpoint
+    /// and refreshes the presented snapshot at once.
+    /// Bumble Confidential. For Internal Use Only.
+    pub(super) fn set_active_agent_unread(&mut self, pane_id: &str, unread: bool) -> bool {
+        let Some(index) = self
+            .endpoints
+            .iter()
+            .position(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+        else {
+            return false;
+        };
+        let endpoint = &mut self.endpoints[index];
+        let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
+            return false;
+        };
+        let Some(agent) = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)
+            .cloned()
+        else {
+            return false;
+        };
+        if unread {
+            let focused_pane_id = snapshot.focused_pane_id.clone();
+            endpoint
+                .agent_presentation
+                .mark_unread(&agent, focused_pane_id.as_deref());
+        } else {
+            endpoint.agent_presentation.mark_read(&agent);
+        }
+        endpoint.agent_presentation.reproject(snapshot);
+        self.snapshot = endpoint.snapshot.clone();
+        true
+    }
+
     pub(crate) fn acknowledge_active_surface_agents(&mut self, surface: &PaneSurfaceFrame) -> bool {
         let Some(index) = self
             .endpoints

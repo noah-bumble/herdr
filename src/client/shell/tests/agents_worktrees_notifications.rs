@@ -1682,3 +1682,152 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
     assert!(state.visible_notification.is_none());
     assert_eq!(state.pending_notifications.len(), 1);
 }
+
+#[test]
+fn agent_row_right_click_offers_mark_unread_and_mark_read() {
+    // Bumble Confidential. For Internal Use Only.
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut projected = snapshot();
+    projected.agents = vec![agent_row(AgentStatus::Idle, 1, true)];
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).expect("composed frame");
+
+    let row = state.hits.agents.first().expect("agent row hit").0;
+    let open = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: row.x + 1,
+        row: row.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(open.actions.is_empty());
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Agent { ref pane_id, unread: false },
+            ..
+        })) if pane_id == "pane_1"
+    ));
+    state.compose(106, 20).expect("agent context menu");
+    let mark_index = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => {
+            let items = menu.items();
+            assert!(items
+                .iter()
+                .all(|item| item.action != ClientContextMenuAction::MarkRead));
+            items
+                .iter()
+                .position(|item| item.action == ClientContextMenuAction::MarkUnread)
+                .expect("mark unread item")
+        }
+        _ => panic!("agent context menu"),
+    };
+    let mark = state.hits.context_menu_rows[mark_index].0;
+    let outcome =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: mark.x + 1,
+            row: mark.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("mark unread should use the endpoint API");
+    };
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::PaneSetSeen(params)
+            if params.pane_id == "pane_1" && !params.seen
+    ));
+    assert!(state.overlay.is_none());
+
+    // The mark applies at once: the row now shows done and the menu offers "Mark read".
+    state.compose(106, 20).expect("composed frame");
+    assert_eq!(
+        state
+            .snapshot
+            .as_deref()
+            .and_then(|snapshot| snapshot.agents.first())
+            .map(|agent| agent.agent_status),
+        Some(AgentStatus::Done)
+    );
+    let row = state.hits.agents.first().expect("agent row hit").0;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: row.x + 1,
+        row: row.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    match state.overlay.take() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => {
+            assert!(matches!(
+                menu.target,
+                ClientContextMenuTarget::Agent { unread: true, .. }
+            ));
+            assert!(menu
+                .items()
+                .iter()
+                .any(|item| item.action == ClientContextMenuAction::MarkRead));
+        }
+        _ => panic!("agent context menu"),
+    }
+
+    // A fresh server snapshot with the same agent sequence keeps the mark.
+    let mut projected = snapshot();
+    projected.revision = 2;
+    projected.agents = vec![agent_row(AgentStatus::Idle, 1, true)];
+    state.set_snapshot(Box::new(projected));
+    assert_eq!(first_agent_status(&state), Some(AgentStatus::Done));
+
+    // Focus moves away, then back to the pane: the mark clears.
+    let mut projected = snapshot();
+    projected.revision = 3;
+    projected.focused_pane_id = None;
+    projected.agents = vec![agent_row(AgentStatus::Idle, 1, false)];
+    state.set_snapshot(Box::new(projected));
+    assert_eq!(first_agent_status(&state), Some(AgentStatus::Done));
+    let mut projected = snapshot();
+    projected.revision = 4;
+    projected.agents = vec![agent_row(AgentStatus::Idle, 1, true)];
+    state.set_snapshot(Box::new(projected));
+    assert_eq!(first_agent_status(&state), Some(AgentStatus::Idle));
+
+    // The agent working again also clears a mark.
+    let mut projected = snapshot();
+    projected.revision = 5;
+    projected.agents = vec![agent_row(AgentStatus::Idle, 1, true)];
+    state.set_snapshot(Box::new(projected));
+    state.set_active_agent_unread("pane_1", true);
+    assert_eq!(first_agent_status(&state), Some(AgentStatus::Done));
+    let mut projected = snapshot();
+    projected.revision = 6;
+    projected.agents = vec![agent_row(AgentStatus::Working, 2, true)];
+    state.set_snapshot(Box::new(projected));
+    assert_eq!(first_agent_status(&state), Some(AgentStatus::Working));
+}
+
+fn agent_row(status: AgentStatus, sequence: u64, focused: bool) -> ClientShellAgent {
+    ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("first".into()),
+        display_agent: None,
+        agent: None,
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: status,
+        state_change_seq: sequence,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused,
+    }
+}
+
+fn first_agent_status(state: &ClientShellState) -> Option<AgentStatus> {
+    state
+        .snapshot
+        .as_deref()
+        .and_then(|snapshot| snapshot.agents.first())
+        .map(|agent| agent.agent_status)
+}

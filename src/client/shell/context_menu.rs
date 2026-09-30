@@ -50,6 +50,17 @@ impl ClientContextMenuOverlay {
                 item("Rename", Action::Rename),
                 item("Close", Action::Close),
             ],
+            ClientContextMenuTarget::Agent { unread, .. } => vec![
+                item("Focus", Action::FocusAgent),
+                item(
+                    if *unread { "Mark read" } else { "Mark unread" },
+                    if *unread {
+                        Action::MarkRead
+                    } else {
+                        Action::MarkUnread
+                    },
+                ),
+            ],
             ClientContextMenuTarget::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -167,6 +178,24 @@ impl ClientShellState {
         }));
     }
 
+    pub(super) fn open_agent_context_menu(&mut self, pane_id: String, x: u16, y: u16) {
+        let Some(agent) = self.snapshot.as_deref().and_then(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.pane_id == pane_id)
+        }) else {
+            return;
+        };
+        let unread = agent.agent_status == crate::api::schema::AgentStatus::Done;
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Agent { pane_id, unread },
+            x,
+            y,
+            highlighted: 0,
+        }));
+    }
+
     pub(super) fn move_context_menu_selection(&mut self, delta: isize) {
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
             return;
@@ -215,8 +244,35 @@ impl ClientShellState {
                 action,
                 outcome,
             ),
+            ClientContextMenuTarget::Agent { pane_id, .. } => {
+                self.activate_agent_context_action(pane_id, action, outcome)
+            }
         }
         outcome.repaint = true;
+    }
+
+    fn activate_agent_context_action(
+        &mut self,
+        pane_id: String,
+        action: ClientContextMenuAction,
+        outcome: &mut ClientShellInput,
+    ) {
+        use crate::api::schema::{Method, PaneSetSeenParams, PaneTarget};
+
+        match action {
+            ClientContextMenuAction::FocusAgent => {
+                self.push_endpoint_method(Method::PaneFocus(PaneTarget { pane_id }), outcome)
+            }
+            ClientContextMenuAction::MarkUnread | ClientContextMenuAction::MarkRead => {
+                let seen = action == ClientContextMenuAction::MarkRead;
+                self.set_active_agent_unread(&pane_id, !seen);
+                self.push_endpoint_method(
+                    Method::PaneSetSeen(PaneSetSeenParams { pane_id, seen }),
+                    outcome,
+                );
+            }
+            _ => {}
+        }
     }
 
     fn activate_workspace_context_action(

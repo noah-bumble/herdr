@@ -3,12 +3,25 @@ use std::collections::{HashMap, HashSet};
 use crate::api::schema::AgentStatus;
 use crate::protocol::{ClientShellAgent, ClientShellSnapshot, PaneSurfaceFrame};
 
+/// A user-requested unread mark on one agent pane.
+/// Bumble Confidential. For Internal Use Only.
+#[derive(Clone, Copy, Debug)]
+struct ManualUnread {
+    /// The agent `state_change_seq` when the user marked it. A newer sequence
+    /// means the agent moved on, so the mark no longer applies.
+    sequence: u64,
+    /// Whether the pane was already the focused pane when marked. The mark
+    /// clears when the pane becomes focused after not being focused.
+    focused_at_mark: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct EndpointAgentPresentation {
     boot_id: Option<String>,
     acknowledged: HashMap<String, u64>,
     completed: HashMap<String, u64>,
     working: HashSet<String>,
+    manual_unread: HashMap<String, ManualUnread>,
     pending_completions: Option<(
         Option<u64>,
         crate::protocol::endpoint::EndpointAgentCompletions,
@@ -50,6 +63,7 @@ impl EndpointAgentPresentation {
             self.acknowledged.clear();
             self.completed.clear();
             self.working.clear();
+            self.manual_unread.clear();
             self.acknowledged.extend(
                 snapshot
                     .agents
@@ -68,6 +82,9 @@ impl EndpointAgentPresentation {
             .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
         self.working
             .retain(|pane_id| pane_ids.contains(pane_id.as_str()));
+        self.manual_unread
+            .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
+        let focused_pane_id = snapshot.focused_pane_id.clone();
         let completions = self
             .pending_completions
             .take()
@@ -110,6 +127,52 @@ impl EndpointAgentPresentation {
                     self.completed.remove(&agent.pane_id);
                 }
             }
+            self.retire_manual_unread(agent, focused_pane_id.as_deref());
+            agent.agent_status = self.projected_status(agent);
+        }
+        project_aggregate_status(snapshot);
+    }
+
+    /// Drops a manual unread mark once the agent moves on or the user comes
+    /// back to the pane.
+    fn retire_manual_unread(&mut self, agent: &ClientShellAgent, focused_pane_id: Option<&str>) {
+        let Some(mark) = self.manual_unread.get_mut(&agent.pane_id) else {
+            return;
+        };
+        let idle = matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done);
+        let focused = focused_pane_id == Some(agent.pane_id.as_str());
+        if mark.sequence != agent.state_change_seq || !idle || (focused && !mark.focused_at_mark) {
+            self.manual_unread.remove(&agent.pane_id);
+        } else if !focused {
+            mark.focused_at_mark = false;
+        }
+    }
+
+    /// Marks an idle agent as unread. The Agents panel then shows it as done
+    /// until the user focuses the pane, marks it read, or the agent works again.
+    pub(super) fn mark_unread(&mut self, agent: &ClientShellAgent, focused_pane_id: Option<&str>) {
+        self.manual_unread.insert(
+            agent.pane_id.clone(),
+            ManualUnread {
+                sequence: agent.state_change_seq,
+                focused_at_mark: focused_pane_id == Some(agent.pane_id.as_str()),
+            },
+        );
+        self.completed
+            .insert(agent.pane_id.clone(), agent.state_change_seq);
+    }
+
+    /// Marks an agent as read, which also acknowledges its latest completion.
+    pub(super) fn mark_read(&mut self, agent: &ClientShellAgent) {
+        self.manual_unread.remove(&agent.pane_id);
+        let acknowledged = self.acknowledged.entry(agent.pane_id.clone()).or_default();
+        *acknowledged = (*acknowledged).max(agent.state_change_seq);
+    }
+
+    /// Recomputes projected statuses on an already projected snapshot after a
+    /// local presentation change such as a manual unread mark.
+    pub(super) fn reproject(&self, snapshot: &mut ClientShellSnapshot) {
+        for agent in &mut snapshot.agents {
             agent.agent_status = self.projected_status(agent);
         }
         project_aggregate_status(snapshot);
@@ -154,6 +217,13 @@ impl EndpointAgentPresentation {
     }
 
     pub(super) fn seen(&self, agent: &ClientShellAgent) -> bool {
+        if self
+            .manual_unread
+            .get(&agent.pane_id)
+            .is_some_and(|mark| mark.sequence == agent.state_change_seq)
+        {
+            return false;
+        }
         self.completed.get(&agent.pane_id).is_none_or(|completion| {
             self.acknowledged
                 .get(&agent.pane_id)

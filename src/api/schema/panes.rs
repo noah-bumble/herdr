@@ -436,6 +436,15 @@ pub struct PaneClearAgentAuthorityParams {
     pub seq: Option<u64>,
 }
 
+/// Bumble Confidential. For Internal Use Only.
+/// Marks a pane as seen or unseen. An idle pane that is not seen reports the
+/// `done` agent status, which is how the sidebar shows unread completions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneSetSeenParams {
+    pub pane_id: String,
+    pub seen: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReleaseAgentParams {
     pub pane_id: String,

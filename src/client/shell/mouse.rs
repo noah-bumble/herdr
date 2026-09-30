@@ -1849,6 +1849,17 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                let agent_pane_id = self
+                    .hits
+                    .agents
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .map(|(_, pane_id)| pane_id.clone());
+                if let Some(pane_id) = agent_pane_id {
+                    self.open_agent_context_menu(pane_id, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let pane_id = self
                     .hits
                     .panes

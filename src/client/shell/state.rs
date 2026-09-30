@@ -525,6 +525,9 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    FocusAgent,
+    MarkUnread,
+    MarkRead,
 }
 
 #[derive(Debug)]
@@ -548,6 +551,8 @@ pub(super) enum ClientContextMenuTarget {
         has_manual_label: bool,
         right_click_passthrough: bool,
     },
+    /// An agent row in the Agents panel. Bumble Confidential. For Internal Use Only.
+    Agent { pane_id: String, unread: bool },
 }
 
 #[derive(Debug)]
