@@ -3212,6 +3212,22 @@
           ],
           "type": "object"
         },
+        "PaneSetSeenParams": {
+          "description": "Bumble Confidential. For Internal Use Only.\nMarks a pane as seen or unseen. An idle pane that is not seen reports the\n`done` agent status, which is how the sidebar shows unread completions.",
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "seen": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id",
+            "seen"
+          ],
+          "type": "object"
+        },
         "PaneSplitParams": {
           "properties": {
             "cwd": {
@@ -6001,6 +6017,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneReleaseAgentParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.set_seen",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSetSeenParams"
             }
           },
           "required": [

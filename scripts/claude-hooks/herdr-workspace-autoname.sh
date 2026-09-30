@@ -1,26 +1,29 @@
 #!/bin/sh
 # Bumble Confidential. For Internal Use Only.
 # Claude Code UserPromptSubmit hook for Herdr.
+#
 # On the first user turn of a conversation, it asks a small Claude model for a
 # 1-3 word description of the prompt and renames the current Herdr workspace.
+# Every 10th turn after that, it shows the model the current name and the
+# recent prompts, and lets it keep or change the name.
 #
 # Install: add to ~/.claude/settings.json under hooks.UserPromptSubmit:
 #   {"type":"command","command":"sh ~/.claude/hooks/herdr-workspace-autoname.sh","timeout":5}
 #
 # Environment knobs:
-#   HERDR_AUTONAME_MODEL   model id for the naming call (default: claude-haiku-4-5-20251001)
-#   HERDR_AUTONAME_DISABLE set to 1 to turn the hook off
+#   HERDR_AUTONAME_MODEL     model id for the naming call (default: claude-haiku-4-5-20251001)
+#   HERDR_AUTONAME_INTERVAL  turns between re-checks after the first (default: 10)
+#   HERDR_AUTONAME_DISABLE   set to 1 to turn the hook off
 
 set -eu
 
-# Never run inside the nested naming call, or outside a Herdr pane.
 [ "${HERDR_AUTONAME_NESTED:-}" = "1" ] && exit 0
 [ "${HERDR_AUTONAME_DISABLE:-}" = "1" ] && exit 0
 [ "${HERDR_ENV:-}" = "1" ] || exit 0
 [ -n "${HERDR_WORKSPACE_ID:-}" ] || exit 0
 command -v herdr >/dev/null 2>&1 || exit 0
 command -v claude >/dev/null 2>&1 || exit 0
-command -v /usr/bin/python3 >/dev/null 2>&1 || exit 0
+[ -x /usr/bin/python3 ] || exit 0
 
 input="$(cat 2>/dev/null || true)"
 [ -n "$input" ] || exit 0
@@ -28,36 +31,51 @@ input="$(cat 2>/dev/null || true)"
 state_dir="${TMPDIR:-/tmp}/herdr-autoname"
 mkdir -p "$state_dir" 2>/dev/null || exit 0
 
-# Decide whether this is the first turn. Prints the prompt on stdout when it is.
-prompt="$(HERDR_INPUT="$input" HERDR_STATE_DIR="$state_dir" /usr/bin/python3 - <<'PY'
-import json, os, sys
+# The slow part runs in the background so the hook returns at once.
+HERDR_INPUT="$input" HERDR_STATE_DIR="$state_dir" nohup /usr/bin/python3 - <<'PY' >/dev/null 2>&1 &
+import json, os, re, subprocess, sys
 
 raw = os.environ.get("HERDR_INPUT", "")
+state_dir = os.environ["HERDR_STATE_DIR"]
+workspace_id = os.environ["HERDR_WORKSPACE_ID"]
+model = os.environ.get("HERDR_AUTONAME_MODEL", "claude-haiku-4-5-20251001")
+try:
+    interval = max(2, int(os.environ.get("HERDR_AUTONAME_INTERVAL", "10")))
+except ValueError:
+    interval = 10
+log_path = os.path.join(state_dir, "autoname.log")
+
+
+def log(message):
+    try:
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(message.rstrip() + "\n")
+    except Exception:
+        pass
+
+
 try:
     data = json.loads(raw)
 except Exception:
     sys.exit(0)
-
-if data.get("hook_event_name") not in (None, "UserPromptSubmit"):
+if data.get("hook_event_name") not in (None, "UserPromptSubmit") or data.get("agent_id"):
     sys.exit(0)
-if data.get("agent_id"):
-    sys.exit(0)
-
 session_id = str(data.get("session_id") or "")
 prompt = str(data.get("prompt") or "").strip()
 if not session_id or not prompt:
     sys.exit(0)
 
-marker = os.path.join(os.environ["HERDR_STATE_DIR"], session_id)
-if os.path.exists(marker):
-    sys.exit(0)
+# Slash-command echoes and system notices count as user entries in the
+# transcript. Skip them so turn numbers match what the person typed.
+SKIP_PREFIXES = ("<command-name>", "<local-command-stdout>", "<local-command-caveat>", "<system-reminder>")
 
-# A resumed conversation already has user turns in its transcript.
-transcript = data.get("transcript_path")
-user_turns = 0
-if isinstance(transcript, str) and os.path.exists(transcript):
+
+def prior_prompts(transcript_path):
+    prompts = []
+    if not isinstance(transcript_path, str) or not os.path.exists(transcript_path):
+        return prompts
     try:
-        with open(transcript, encoding="utf-8", errors="replace") as handle:
+        with open(transcript_path, encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 try:
                     entry = json.loads(line)
@@ -66,46 +84,99 @@ if isinstance(transcript, str) and os.path.exists(transcript):
                 if entry.get("type") != "user" or entry.get("isMeta"):
                     continue
                 content = (entry.get("message") or {}).get("content")
+                text = None
                 if isinstance(content, str):
-                    user_turns += 1
-                elif isinstance(content, list) and any(
-                    isinstance(part, dict) and part.get("type") == "text" for part in content
-                ):
-                    user_turns += 1
+                    text = content
+                elif isinstance(content, list):
+                    parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                    if parts:
+                        text = "\n".join(parts)
+                if text is None:
+                    continue
+                text = text.strip()
+                if not text or text.startswith(SKIP_PREFIXES):
+                    continue
+                prompts.append(text)
     except Exception:
         pass
+    return prompts
 
+
+# The current prompt is not in the transcript yet when this hook runs.
+history = prior_prompts(data.get("transcript_path"))
+turn = len(history) + 1
+
+# One run per (session, turn) even if the hook fires twice.
+marker = os.path.join(state_dir, f"{session_id}.{turn}")
+if os.path.exists(marker):
+    sys.exit(0)
 try:
     open(marker, "w").close()
 except Exception:
     pass
 
-if user_turns > 1:
+first_turn = turn == 1
+if not first_turn and turn % interval != 0:
     sys.exit(0)
 
-sys.stdout.write(prompt[:2000])
+
+def run(args, stdin_text=None, timeout=60):
+    return subprocess.run(
+        args, input=stdin_text, capture_output=True, text=True, timeout=timeout,
+        env={**os.environ, "HERDR_AUTONAME_NESTED": "1"},
+    )
+
+
+def current_label():
+    try:
+        result = run(["herdr", "workspace", "get", workspace_id], timeout=10)
+        payload = json.loads(result.stdout)
+        return str(payload["result"]["workspace"]["label"])
+    except Exception:
+        return ""
+
+
+RULES = (
+    "Reply with a workspace name of 1 to 3 words in title case. "
+    "Output only the name, with no punctuation, quotes, or explanation."
+)
+if first_turn:
+    instruction = "Summarize the coding-agent request on stdin as a workspace name. " + RULES
+    stdin_text = prompt[:2000]
+    label_before = None
+else:
+    label_before = current_label()
+    recent = history[-(interval - 1):] + [prompt]
+    instruction = (
+        "A coding-agent workspace is currently named as shown on stdin, followed by the most recent requests. "
+        "If the name still describes the work, output it unchanged. Otherwise output a better name. " + RULES
+    )
+    stdin_text = f"Current name: {label_before}\n\nRecent requests:\n" + "\n".join(
+        f"- {text[:400]}" for text in recent
+    )
+
+try:
+    result = run(
+        ["claude", "-p", "--model", model, "--setting-sources", "", "--no-session-persistence", instruction],
+        stdin_text=stdin_text, timeout=90,
+    )
+except Exception as error:
+    log(f"turn {turn}: naming call failed: {error}")
+    sys.exit(0)
+label = (result.stdout or "").strip().splitlines()
+label = label[0].strip() if label else ""
+label = re.sub(r"\s+", " ", label.strip(" \"'`"))
+if not label or not re.fullmatch(r"[A-Za-z0-9 ._/-]+", label) or not 1 <= len(label.split()) <= 3:
+    log(f"turn {turn}: rejected label {label!r} (stderr: {result.stderr.strip()[:200]})")
+    sys.exit(0)
+if label_before is not None and label == label_before:
+    log(f"turn {turn}: kept {label!r}")
+    sys.exit(0)
+try:
+    result = run(["herdr", "workspace", "rename", workspace_id, label], timeout=10)
+    log(f"turn {turn}: renamed {workspace_id} {label_before!r} -> {label!r}: {result.stdout.strip()[:200]}")
+except Exception as error:
+    log(f"turn {turn}: rename failed: {error}")
 PY
-)"
-[ -n "$prompt" ] || exit 0
-
-model="${HERDR_AUTONAME_MODEL:-claude-haiku-4-5-20251001}"
-workspace_id="$HERDR_WORKSPACE_ID"
-log="$state_dir/autoname.log"
-
-# Do the slow part in the background so the hook returns at once.
-(
-  label="$(printf '%s' "$prompt" | HERDR_AUTONAME_NESTED=1 claude -p \
-    --model "$model" \
-    --setting-sources "" \
-    --no-session-persistence \
-    'Summarize the following coding-agent request as a workspace name of 1 to 3 words. Use title case. Output only the name, with no punctuation, quotes, or explanation. The request follows on stdin.' \
-    2>>"$log" | head -n 1 | tr -d '\r"'"'"'`' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]]\{2,\}/ /g')"
-  case "$label" in
-    ""|*[!A-Za-z0-9\ ._/-]*) exit 0 ;;
-  esac
-  words="$(printf '%s' "$label" | wc -w | tr -d ' ')"
-  [ "$words" -ge 1 ] && [ "$words" -le 3 ] || exit 0
-  herdr workspace rename "$workspace_id" "$label" >>"$log" 2>&1 || true
-) </dev/null >/dev/null 2>&1 &
 
 exit 0
